@@ -1,88 +1,83 @@
 import telebot
 import requests
-from telebot import types
+import google.generativeai as genai
+from gtts import gTTS
+import qrcode
+import io
 import os
+from flask import Flask
+from threading import Thread
 
-# --- KUTUBXONALARNI TEKSHIRISH ---
-try:
-    from gtts import gTTS
-    GTTS_AVAILABLE = True
-except ImportError:
-    GTTS_AVAILABLE = False
+# --- UYG'OQ SAQLASH UCHUN VEB SERVER ---
+app = Flask('')
 
-# --- SOZLAMALAR ---
-# Tokeningizni bu yerga yozing
-TOKEN = "8520252575:AAGxbYsmhH0ktk_Cy1nmWQUZbVcK-pOE440"
-bot = telebot.TeleBot(TOKEN)
+@app.route('/')
+def home():
+    return "Men uyg'oqman!"
 
-# --- START BUYRUG'I ---
+def run():
+    app.run(host='0.0.0.0', port=10000)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# --- BOT SOZLAMALARI ---
+BOT_TOKEN = "SIZNING_BOT_TOKENINGIZ" # O'zingizni tokeningizni yozing
+AI_API_KEY = "SIZNING_GEMINI_API_KEYINGIZ" # AI Studio'dan olgan kalitingiz
+
+# AI-ni sozlash
+genai.configure(api_key=AI_API_KEY)
+ai_model = genai.GenerativeModel('gemini-pro')
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# /start buyrug'i
 @bot.message_handler(commands=['start'])
 def start(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn1 = types.KeyboardButton("💰 Valyuta")
-    btn2 = types.KeyboardButton("🎙 Matnni ovoz qilish")
-    btn3 = types.KeyboardButton("📲 QR Yaratish")
-    btn4 = types.KeyboardButton("🖼 Rasm")
-    btn5 = types.KeyboardButton("ℹ️ Ma'lumot")
-    markup.add(btn1, btn2, btn3, btn4, btn5)
-    
-    bot.send_message(
-        message.chat.id, 
-        f"Salom {message.from_user.first_name}! Men Chiki chiki botman. Nima qilamiz?", 
-        reply_markup=markup
+    welcome_text = (
+        "Assalomu alaykum! Men aqlli botman. 🤖\n\n"
+        "Menga savol bering (AI javob beradi), yoki:\n"
+        "/currency - Kurslar 💰\n"
+        "/qr [matn] - QR kod 📲\n"
+        "/voice [matn] - Ovozli xabar 🎙"
     )
+    bot.send_message(message.chat.id, welcome_text)
 
-# 1. VALYUTA KURSI
-@bot.message_handler(func=lambda m: m.text == "💰 Valyuta")
+# Valyuta kursi
+@bot.message_handler(commands=['currency'])
 def get_currency(message):
-    try:
-        url = "https://cbu.uz/uz/arkhiv-kursov-valyut/json/"
-        response = requests.get(url).json()
-        usd = next(item for item in response if item['Ccy'] == 'USD')
-        bot.send_message(message.chat.id, f"🇺🇸 1 Dollar = {usd['Rate']} so'm\n📅 Sana: {usd['Date']}")
-    except:
-        bot.send_message(message.chat.id, "Kursni yuklashda xatolik yuz berdi.")
+    url = "https://nbu.uz/uz/exchange-rates/json/"
+    res = requests.get(url).json()
+    usd = next(item for item in res if item['code'] == 'USD')
+    text = f"🇺🇿 MB kursi: 1 USD = {usd['cb_price']} so'm"
+    bot.send_message(message.chat.id, text)
 
-# 2. MATNNI OVOZ QILISH (gTTS)
-@bot.message_handler(func=lambda m: m.text == "🎙 Matnni ovoz qilish")
-def voice_request(message):
-    if not GTTS_AVAILABLE:
-        bot.send_message(message.chat.id, "Kutubxona o'rnatilmagan. Pydroid Terminalda 'pip install gTTS' yozing.")
+# QR kod
+@bot.message_handler(commands=['qr'])
+def make_qr(message):
+    data = message.text.replace('/qr', '').strip()
+    if not data:
+        bot.reply_to(message, "Matn yuboring: /qr salom")
         return
-    msg = bot.send_message(message.chat.id, "Ovozga aylantirish uchun matn yuboring (Masalan: Salom):")
-    bot.register_next_step_handler(msg, process_voice)
+    img = qrcode.make(data)
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    bot.send_photo(message.chat.id, buf)
 
-def process_voice(message):
+# Sun'iy intellekt
+@bot.message_handler(func=lambda message: True)
+def chat_with_ai(message):
     try:
-        tts = gTTS(text=message.text, lang='ru') # Rus yoki O'zbek tili uchun 'ru' mos keladi
-        tts.save("voice.mp3")
-        with open("voice.mp3", "rb") as audio:
-            bot.send_voice(message.chat.id, audio)
-        os.remove("voice.mp3")
-    except Exception as e:
-        bot.send_message(message.chat.id, "Xatolik yuz berdi. Matn yuborganingizga ishonch hosil qiling.")
+        bot.send_chat_action(message.chat.id, 'typing')
+        response = ai_model.generate_content(message.text)
+        bot.reply_to(message, response.text)
+    except:
+        bot.reply_to(message, "Hozircha javob bera olmayman.")
 
-# 3. QR KOD YARATISH
-@bot.message_handler(func=lambda m: m.text == "📲 QR Yaratish")
-def qr_request(message):
-    msg = bot.send_message(message.chat.id, "QR kod ichiga nima yozay? (Link yoki so'z yuboring):")
-    bot.register_next_step_handler(msg, process_qr)
-
-def process_qr(message):
-    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={message.text}"
-    bot.send_photo(message.chat.id, qr_url, caption="Sizning QR kodingiz!")
-
-# 4. TASODIFIY RASM
-@bot.message_handler(func=lambda m: m.text == "🖼 Rasm")
-def send_random_pic(message):
-    pic_url = "https://picsum.photos/640/360"
-    bot.send_photo(message.chat.id, pic_url, caption="Mana sizga rasm!")
-
-# 5. INFO
-@bot.message_handler(func=lambda m: m.text == "ℹ️ Ma'lumot")
-def info(message):
-    bot.send_message(message.chat.id, "Bot yaratuvchisi: Abdulhakim\nFunksiyalar: Valyuta, Ovoz, QR, Rasm.")
-
-# --- BOTNI ISHGA TUSHIRISH ---
-print("Bot muvaffaqiyatli yoqildi...")
-bot.infinity_polling()
+# ASOSIY QISM
+if __name__ == "__main__":
+    keep_alive() # Veb-serverni ishga tushirish
+    bot.polling(none_stop=True)
+    
